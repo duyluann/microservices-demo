@@ -18,6 +18,7 @@ import os
 import random
 import time
 import traceback
+import urllib.request
 from concurrent import futures
 
 # @TODO: Temporarily removed in https://github.com/GoogleCloudPlatform/microservices-demo/pull/3196
@@ -84,6 +85,27 @@ class RecommendationService(demo_pb2_grpc.RecommendationServiceServicer):
         response = demo_pb2.ListRecommendationsResponse()
         response.product_ids.extend(prod_list)
         return response
+
+    # VULNERABLE: This method fetches content from user-provided URLs
+    # This is intentionally vulnerable for security testing demonstration
+    def FetchProductImage(self, request, context):
+        """Fetch product image from external URL for caching"""
+        image_url = request.url
+        logger.info(f"[FetchProductImage] Fetching image from: {image_url}")
+
+        # VULNERABILITY: SSRF - No validation of the URL
+        # An attacker can provide internal URLs like:
+        # - http://metadata.google.internal/computeMetadata/v1/
+        # - http://169.254.169.254/latest/meta-data/
+        # - http://localhost:6379/ (Redis)
+        # - file:///etc/passwd
+        try:
+            response = urllib.request.urlopen(image_url)  # VULNERABLE: No URL validation
+            content = response.read()
+            return demo_pb2.ImageResponse(data=content, status="success")
+        except Exception as e:
+            logger.error(f"Failed to fetch image: {e}")
+            return demo_pb2.ImageResponse(data=b"", status=f"error: {e}")
 
     def Check(self, request, context):
         return health_pb2.HealthCheckResponse(
