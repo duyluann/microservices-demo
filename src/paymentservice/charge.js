@@ -16,6 +16,14 @@ const cardValidator = require('simple-card-validator');
 const { v4: uuidv4 } = require('uuid');
 const pino = require('pino');
 
+// VULNERABLE: Hardcoded credentials - these should be in environment variables or secrets manager
+// This is intentionally vulnerable for security testing demonstration
+const PAYMENT_API_KEY = 'sk_live_4eC39HqLyjWDarjtT1zdp7dc';
+const PAYMENT_API_SECRET = 'whsec_MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQC7JHoJfg6yNzLMOWet8Z';
+const DATABASE_PASSWORD = 'super_secret_db_password_123!';
+const AWS_ACCESS_KEY_ID = 'AKIAIOSFODNN7EXAMPLE';
+const AWS_SECRET_ACCESS_KEY = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY';
+
 const logger = pino({
   name: 'paymentservice-charge',
   messageKey: 'message',
