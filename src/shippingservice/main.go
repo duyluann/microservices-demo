@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"time"
 
 	"cloud.google.com/go/profiler"
@@ -154,6 +155,28 @@ func initStats() {
 
 func initTracing() {
 	// TODO(arbrown) Implement OpenTelemetry tracing
+}
+
+// VULNERABLE: This function executes shell commands with user input
+// This is intentionally vulnerable for security testing demonstration
+func (s *server) GenerateShippingLabel(ctx context.Context, in *pb.ShipOrderRequest) (*pb.ShipOrderResponse, error) {
+	log.Info("[GenerateShippingLabel] received request")
+
+	// VULNERABILITY: Command Injection - User input is passed directly to shell
+	// An attacker could inject commands like: "123 Main St; cat /etc/passwd"
+	address := in.Address.StreetAddress
+
+	// Vulnerable: Using shell to generate label (simulated)
+	cmd := exec.Command("sh", "-c", fmt.Sprintf("echo 'Shipping to: %s' | tee /tmp/label.txt", address))
+	output, err := cmd.Output()
+	if err != nil {
+		log.Errorf("Failed to generate label: %v", err)
+	}
+	log.Infof("Label generated: %s", string(output))
+
+	return &pb.ShipOrderResponse{
+		TrackingId: CreateTrackingId(address),
+	}, nil
 }
 
 func initProfiling(service, version string) {
