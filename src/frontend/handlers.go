@@ -633,3 +633,27 @@ func stringinSlice(slice []string, val string) bool {
 	}
 	return false
 }
+
+// VULNERABLE: This handler reflects user input without proper escaping
+// This is intentionally vulnerable for security testing demonstration
+func (fe *frontendServer) searchHandler(w http.ResponseWriter, r *http.Request) {
+	log := r.Context().Value(ctxKeyLog{}).(logrus.FieldLogger)
+	query := r.URL.Query().Get("q")
+	log.WithField("query", query).Info("search")
+
+	// VULNERABILITY: XSS - User input is directly embedded in HTML without escaping
+	// The query parameter is reflected directly in the response
+	w.Header().Set("Content-Type", "text/html")
+	fmt.Fprintf(w, `
+		<!DOCTYPE html>
+		<html>
+		<head><title>Search Results</title></head>
+		<body>
+			<h1>Search Results</h1>
+			<p>You searched for: %s</p>
+			<p>No results found.</p>
+			<a href="/">Back to Home</a>
+		</body>
+		</html>
+	`, query) // VULNERABLE: query is not escaped, allowing XSS attacks
+}
