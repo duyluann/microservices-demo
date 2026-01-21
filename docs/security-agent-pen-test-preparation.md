@@ -139,15 +139,24 @@ Before running penetration tests, you must verify ownership of all target domain
 #### DNS TXT Record (Recommended)
 1. Navigate to your agent space configuration
 2. Select **Penetration testing** > **Enable penetration test**
-3. Add your target domain
+3. Add your target domain: `micro-demo.ops4life.com`
 4. Choose **DNS txt record** as verification method
 5. Copy the provided TXT record
 6. Add the TXT record to your DNS configuration:
    ```
+   # For micro-demo.ops4life.com
+   _aws-security-agent-verification.micro-demo.ops4life.com TXT "verification-token"
+
+   # Generic format
    _aws-security-agent-verification.yourdomain.com TXT "verification-token"
    ```
 7. Wait for DNS propagation (can take up to 48 hours)
-8. Click **Verify** in the console
+8. Verify DNS propagation:
+   ```bash
+   # Check if TXT record is visible
+   dig TXT _aws-security-agent-verification.micro-demo.ops4life.com
+   ```
+9. Click **Verify** in the console
 
 #### Other Verification Methods
 - HTTP file upload
@@ -161,8 +170,18 @@ If using the default Kubernetes manifests with `frontend-external` service:
 # Get your frontend external IP
 kubectl get service frontend-external
 
+# Expected output:
+# NAME                TYPE           CLUSTER-IP      EXTERNAL-IP     PORT(S)        AGE
+# frontend-external   LoadBalancer   10.x.x.x        <EXTERNAL-IP>   80:xxxxx/TCP   5m
+
 # Verify domain points to this IP
-dig +short yourdomain.com
+dig +short micro-demo.ops4life.com
+
+# Alternative: use nslookup
+nslookup micro-demo.ops4life.com
+
+# Test connectivity
+curl -I https://micro-demo.ops4life.com
 ```
 
 #### Minikube/Kind (Local Development)
@@ -184,10 +203,17 @@ ngrok http 8080
 3. Configure target domains:
 
 **For Online Boutique:**
-- Add your frontend domain (e.g., `boutique.example.com`)
+- Add your frontend domain
 - Maximum 4 domains per agent space
 
 ### Target URL Examples
+
+**Primary Frontend URL:**
+```
+https://micro-demo.ops4life.com
+```
+
+**Additional Target Examples:**
 
 ```
 # Production deployment
@@ -199,6 +225,28 @@ https://staging-boutique.example.com
 # Specific service endpoints (if exposed)
 https://api.boutique.example.com
 ```
+
+**Recommended Target URLs for Penetration Testing:**
+
+For comprehensive testing of the Online Boutique application, configure these target URLs:
+
+1. **Frontend Application** (Primary Target):
+   - `https://micro-demo.ops4life.com` - Main web interface
+   - Tests: XSS, CSRF, session management, authentication bypass
+
+2. **API Endpoints** (if separately exposed):
+   - Add specific service endpoints if they're accessible externally
+   - Example: `https://api.micro-demo.ops4life.com`
+
+3. **Health Check Endpoints**:
+   - Frontend: `https://micro-demo.ops4life.com/_healthz`
+   - Useful for initial connectivity verification
+
+**Testing Scope Recommendations:**
+
+- **Start with**: `https://micro-demo.ops4life.com` (frontend only)
+- **Expand to**: Individual microservice endpoints if exposed via Ingress/Gateway
+- **Consider**: Different environment subdomains (dev, staging, prod)
 
 ## Context Gathering
 
@@ -445,7 +493,17 @@ Before running your first penetration test, verify:
 **Issue**: DNS TXT record not detected
 
 **Solutions**:
-- Verify DNS propagation: `dig TXT _aws-security-agent-verification.yourdomain.com`
+```bash
+# Verify DNS propagation for your domain
+dig TXT _aws-security-agent-verification.micro-demo.ops4life.com
+
+# Check with multiple DNS servers
+dig @8.8.8.8 TXT _aws-security-agent-verification.micro-demo.ops4life.com
+dig @1.1.1.1 TXT _aws-security-agent-verification.micro-demo.ops4life.com
+
+# Check TTL settings
+dig TXT _aws-security-agent-verification.micro-demo.ops4life.com +noall +answer
+```
 - Check TTL settings and wait for cache expiration
 - Try alternate verification methods (HTTP file, meta tag)
 - Ensure no DNSSEC validation issues
@@ -455,12 +513,34 @@ Before running your first penetration test, verify:
 **Issue**: Cannot reach target application
 
 **Solutions**:
-- Verify application is running: `kubectl get pods`
-- Check service endpoints: `kubectl get services`
-- Verify LoadBalancer has external IP: `kubectl get service frontend-external`
-- Test connectivity: `curl -v https://yourdomain.com`
+```bash
+# Verify application is running
+kubectl get pods -l app=frontend
+
+# Check service endpoints
+kubectl get services frontend frontend-external
+
+# Verify LoadBalancer has external IP
+kubectl get service frontend-external -o wide
+
+# Test DNS resolution
+dig +short micro-demo.ops4life.com
+
+# Test connectivity
+curl -I https://micro-demo.ops4life.com
+
+# Verbose connection test
+curl -v https://micro-demo.ops4life.com
+
+# Check if specific paths are accessible
+curl https://micro-demo.ops4life.com/_healthz
+```
 - Review security group rules for VPC configurations
 - Check CloudWatch logs for detailed error messages
+- Verify SSL/TLS certificate is valid:
+  ```bash
+  openssl s_client -connect micro-demo.ops4life.com:443 -servername micro-demo.ops4life.com
+  ```
 
 ### Authentication Issues
 
