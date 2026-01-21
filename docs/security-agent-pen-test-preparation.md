@@ -6,9 +6,11 @@ This guide provides step-by-step instructions for preparing your Online Boutique
 
 - [Overview](#overview)
 - [Prerequisites](#prerequisites)
+- [EKS Deployment](#eks-deployment)
 - [Initial Setup](#initial-setup)
 - [Domain Verification](#domain-verification)
 - [Target Configuration](#target-configuration)
+- [Available Endpoints for Penetration Testing](#available-endpoints-for-penetration-testing)
 - [Context Gathering](#context-gathering)
 - [Authentication Setup](#authentication-setup)
 - [Network Configuration](#network-configuration)
@@ -56,6 +58,183 @@ AWS Security Agent provides on-demand penetration testing that discovers and val
 - Security/AppSec team member to configure agent space
 - Developer access to provide application context
 - Access to authentication credentials for protected endpoints
+
+## EKS Deployment
+
+This section covers deploying Online Boutique to your existing Amazon EKS cluster for AWS Security Agent penetration testing.
+
+### Deployment Environment
+
+**Cluster Details:**
+- **Region**: us-east-1 (N. Virginia)
+- **Cluster Name**: ops4life-dev-cluster
+- **Target Domain**: https://micro-demo.ops4life.com
+
+### Step 1: Connect to Your EKS Cluster
+
+Configure kubectl to connect to your existing EKS cluster:
+
+```bash
+# Update kubeconfig for your EKS cluster
+aws eks update-kubeconfig \
+    --region us-east-1 \
+    --name ops4life-dev-cluster
+
+# Verify connection
+kubectl get nodes
+
+# Check cluster information
+kubectl cluster-info
+
+# Verify you're in the correct context
+kubectl config current-context
+```
+
+### Step 2: Deploy Online Boutique
+
+Deploy the microservices using the standard Kubernetes manifests:
+
+```bash
+# Clone the repository if you haven't already
+git clone https://github.com/GoogleCloudPlatform/microservices-demo.git
+cd microservices-demo/
+
+# Deploy all services
+kubectl apply -f ./release/kubernetes-manifests.yaml
+
+# Watch pods come online
+kubectl get pods -w
+
+# Expected output after a few minutes:
+# NAME                                     READY   STATUS    RESTARTS   AGE
+# adservice-xxx                            1/1     Running   0          2m
+# cartservice-xxx                          1/1     Running   0          2m
+# checkoutservice-xxx                      1/1     Running   0          2m
+# currencyservice-xxx                      1/1     Running   0          2m
+# emailservice-xxx                         1/1     Running   0          2m
+# frontend-xxx                             1/1     Running   0          2m
+# loadgenerator-xxx                        1/1     Running   0          2m
+# paymentservice-xxx                       1/1     Running   0          2m
+# productcatalogservice-xxx                1/1     Running   0          2m
+# recommendationservice-xxx                1/1     Running   0          2m
+# redis-cart-xxx                           1/1     Running   0          2m
+# shippingservice-xxx                      1/1     Running   0          2m
+```
+
+### Step 3: Configure LoadBalancer and Domain
+
+Get the AWS LoadBalancer endpoint and configure DNS:
+
+```bash
+# Get the LoadBalancer hostname
+kubectl get service frontend-external
+
+# Expected output:
+# NAME                TYPE           CLUSTER-IP      EXTERNAL-IP                                                                    PORT(S)        AGE
+# frontend-external   LoadBalancer   10.100.x.x      a1234567890abcdef-123456789.us-east-1.elb.amazonaws.com                       80:xxxxx/TCP   5m
+
+# The EXTERNAL-IP is an AWS Elastic Load Balancer (ELB) DNS name
+```
+
+**Configure DNS:**
+
+Option 1: Using AWS Route 53
+```bash
+# If using Route 53, create an A record (Alias) pointing to the ELB
+# micro-demo.ops4life.com -> a1234567890abcdef-123456789.us-east-1.elb.amazonaws.com
+```
+
+Option 2: Using External DNS Provider
+```
+# Create an A record or CNAME pointing to the ELB hostname
+# Type: A (if supported) or CNAME
+# Name: micro-demo.ops4life.com
+# Value: <ELB-DNS-NAME>
+```
+
+Verify DNS propagation:
+```bash
+# Check DNS resolution
+dig micro-demo.ops4life.com
+
+# Test connectivity
+curl -I http://micro-demo.ops4life.com
+```
+
+### Step 4: Configure SSL/TLS (Recommended)
+
+For HTTPS access, configure SSL certificate:
+
+**Option 1: AWS Certificate Manager (ACM)**
+
+```bash
+# Request or import certificate in ACM
+aws acm request-certificate \
+    --domain-name micro-demo.ops4life.com \
+    --validation-method DNS \
+    --region us-east-1
+
+# Get certificate ARN
+aws acm list-certificates --region us-east-1
+
+# Annotate the frontend-external service to use ACM certificate
+kubectl annotate service frontend-external \
+    service.beta.kubernetes.io/aws-load-balancer-ssl-cert=arn:aws:acm:us-east-1:ACCOUNT_ID:certificate/CERT_ID \
+    service.beta.kubernetes.io/aws-load-balancer-backend-protocol=http \
+    service.beta.kubernetes.io/aws-load-balancer-ssl-ports=443
+
+# Update service to expose port 443
+kubectl patch service frontend-external -p '{"spec":{"ports":[{"port":443,"targetPort":8080,"name":"https"}]}}'
+```
+
+**Option 2: Let's Encrypt with cert-manager**
+
+Install cert-manager and configure ingress (alternative to LoadBalancer).
+
+### EKS-Specific Considerations
+
+#### IAM Roles for Service Accounts (IRSA)
+If your services need AWS API access:
+```bash
+# Create IAM role for service account
+eksctl create iamserviceaccount \
+    --cluster=ops4life-dev-cluster \
+    --region=us-east-1 \
+    --name=frontend \
+    --namespace=default \
+    --attach-policy-arn=arn:aws:iam::aws:policy/ReadOnlyAccess \
+    --approve
+```
+
+#### Security Groups
+Ensure your EKS cluster's security groups allow:
+- Inbound HTTP (80) and HTTPS (443) traffic to LoadBalancer
+- Outbound traffic for AWS Security Agent testing
+
+#### VPC Configuration for Security Agent
+Since both the EKS cluster and AWS Security Agent are in us-east-1:
+- Ensure LoadBalancer is internet-facing (default) for public testing
+- For private endpoint testing, configure VPC settings in Security Agent to access services within the same VPC
+- Same-region deployment simplifies network connectivity
+
+### Verification
+
+Test your deployment:
+
+```bash
+# Check all pods are running
+kubectl get pods --all-namespaces
+
+# Test frontend locally
+kubectl port-forward svc/frontend 8080:80
+# Visit http://localhost:8080
+
+# Test public access
+curl https://micro-demo.ops4life.com
+
+# Check health endpoint
+curl https://micro-demo.ops4life.com/_healthz
+```
 
 ## Initial Setup
 
@@ -164,6 +343,27 @@ Before running penetration tests, you must verify ownership of all target domain
 
 ### Online Boutique Deployment Scenarios
 
+#### EKS with LoadBalancer (Your Configuration)
+For the ops4life-dev-cluster in us-east-1:
+```bash
+# Connect to your EKS cluster
+aws eks update-kubeconfig --region us-east-1 --name ops4life-dev-cluster
+
+# Get LoadBalancer endpoint
+kubectl get service frontend-external
+
+# Expected output shows AWS ELB DNS:
+# NAME                TYPE           CLUSTER-IP      EXTERNAL-IP                                                PORT(S)
+# frontend-external   LoadBalancer   10.100.x.x      abc123.us-east-1.elb.amazonaws.com                        80:xxxxx/TCP
+
+# Verify DNS points to ELB
+dig micro-demo.ops4life.com
+
+# Test connectivity
+curl -I https://micro-demo.ops4life.com
+curl https://micro-demo.ops4life.com/_healthz
+```
+
 #### GKE with LoadBalancer
 If using the default Kubernetes manifests with `frontend-external` service:
 ```bash
@@ -247,6 +447,248 @@ For comprehensive testing of the Online Boutique application, configure these ta
 - **Start with**: `https://micro-demo.ops4life.com` (frontend only)
 - **Expand to**: Individual microservice endpoints if exposed via Ingress/Gateway
 - **Consider**: Different environment subdomains (dev, staging, prod)
+
+## Available Endpoints for Penetration Testing
+
+This section provides a comprehensive list of all HTTP endpoints available for security testing on your Online Boutique deployment.
+
+### Frontend HTTP Endpoints
+
+#### Main Application Routes
+
+| URL | Method | Description | Attack Vectors to Test |
+|-----|--------|-------------|----------------------|
+| `/` | GET, HEAD | Home page - product listings | XSS, HTML injection |
+| `/product/{id}` | GET, HEAD | Individual product details | Path traversal, IDOR, XSS |
+| `/cart` | GET, HEAD | View shopping cart | Session hijacking, CSRF |
+| `/cart` | POST | Add item to cart | CSRF, parameter tampering, business logic flaws |
+| `/cart/empty` | POST | Empty shopping cart | CSRF, session manipulation |
+| `/cart/checkout` | POST | Place order/checkout | Payment logic flaws, race conditions, CSRF |
+| `/setCurrency` | POST | Change currency preference | CSRF, parameter tampering |
+| `/logout` | GET | User logout | Session management flaws |
+| `/assistant` | GET | Shopping assistant (AI feature) | Prompt injection, XSS |
+| `/bot` | POST | Chatbot endpoint | Command injection, prompt injection, XSS |
+| `/product-meta/{ids}` | GET | Product metadata API | IDOR, injection, information disclosure |
+
+#### Static Resources
+
+| URL | Method | Description | Attack Vectors to Test |
+|-----|--------|-------------|----------------------|
+| `/static/*` | GET | Static files (CSS, JS, images) | Path traversal, arbitrary file read |
+
+#### System Endpoints
+
+| URL | Method | Description | Attack Vectors to Test |
+|-----|--------|-------------|----------------------|
+| `/_healthz` | GET | Health check endpoint | Information disclosure |
+| `/robots.txt` | GET | Robots exclusion file | Information gathering |
+
+### Complete Target URLs for AWS Security Agent
+
+#### Primary Targets (High Priority)
+
+Configure these URLs as your primary targets in AWS Security Agent:
+
+```
+# Main application
+https://micro-demo.ops4life.com/
+
+# Product browsing
+https://micro-demo.ops4life.com/product/OLJCESPC7Z
+https://micro-demo.ops4life.com/product/66VCHSJNUP
+https://micro-demo.ops4life.com/product/1YMWWN1N4O
+
+# Shopping cart operations
+https://micro-demo.ops4life.com/cart
+
+# Checkout flow
+https://micro-demo.ops4life.com/cart/checkout
+
+# API endpoints
+https://micro-demo.ops4life.com/product-meta/OLJCESPC7Z,66VCHSJNUP
+```
+
+**AI/Bot Features** (if enabled via environment variables):
+```
+https://micro-demo.ops4life.com/assistant
+https://micro-demo.ops4life.com/bot
+```
+
+#### Secondary Targets (Medium Priority)
+
+```
+# Currency operations
+https://micro-demo.ops4life.com/setCurrency
+
+# Session management
+https://micro-demo.ops4life.com/logout
+
+# Cart management
+https://micro-demo.ops4life.com/cart/empty
+```
+
+#### System Endpoints (Low Priority - Information Gathering)
+
+```
+# Health check
+https://micro-demo.ops4life.com/_healthz
+
+# Robots file
+https://micro-demo.ops4life.com/robots.txt
+
+# Static resources
+https://micro-demo.ops4life.com/static/
+```
+
+### Backend gRPC Services
+
+These services are internal and not directly accessible from the internet, but are called by the frontend:
+
+| Service | Port | Description | Related Frontend Endpoints |
+|---------|------|-------------|---------------------------|
+| cartservice | 7070 | Shopping cart operations | `/cart`, `/cart/empty` |
+| productcatalogservice | 3550 | Product catalog | `/`, `/product/{id}` |
+| currencyservice | 7000 | Currency conversion | `/setCurrency`, all pages |
+| recommendationservice | 8080 | Product recommendations | `/`, `/product/{id}` |
+| shippingservice | 50051 | Shipping calculations | `/cart/checkout` |
+| checkoutservice | 5050 | Order processing | `/cart/checkout` |
+| adservice | 9555 | Advertisement serving | `/` |
+| paymentservice | 50051 | Payment processing | `/cart/checkout` |
+| emailservice | 5000 | Email notifications | `/cart/checkout` |
+
+**Note**: These gRPC services cannot be directly tested via AWS Security Agent but vulnerabilities in frontend endpoints may expose underlying service issues.
+
+### Recommended Penetration Test Scenarios
+
+#### 1. Authentication & Session Management
+**Test Endpoints:**
+- `POST /cart`
+- `POST /cart/checkout`
+- `GET /logout`
+
+**Scenarios:**
+- Session fixation attacks
+- Session hijacking via cookie theft
+- Logout functionality bypass
+- Session ID predictability
+
+#### 2. Input Validation & Injection
+**Test Endpoints:**
+- `GET /product/{id}` - Test product ID parameter
+- `POST /cart` - Test product_id and quantity parameters
+- `POST /setCurrency` - Test currency_code parameter
+- `GET /product-meta/{ids}` - Test multiple IDs
+
+**Scenarios:**
+- SQL injection in product IDs
+- NoSQL injection in cart operations
+- XSS in product names/descriptions
+- Path traversal in static file access
+- Command injection in bot/assistant features
+
+#### 3. Business Logic Flaws
+**Test Endpoints:**
+- `POST /cart/checkout`
+- `POST /cart`
+- `POST /cart/empty`
+
+**Scenarios:**
+- Price manipulation during checkout
+- Negative quantity orders
+- Race conditions in order placement
+- Cart manipulation after checkout initiation
+- Discount code abuse
+
+#### 4. CSRF Protection
+**Test All POST Endpoints:**
+- `POST /cart`
+- `POST /cart/empty`
+- `POST /cart/checkout`
+- `POST /setCurrency`
+- `POST /bot`
+
+**Scenarios:**
+- CSRF token validation bypass
+- Cross-origin request testing
+- SameSite cookie attribute testing
+
+#### 5. Cross-Site Scripting (XSS)
+**Test Endpoints:**
+- `GET /` - Test search or filter parameters
+- `GET /product/{id}` - Test reflected parameters
+- `GET /cart` - Test stored cart data
+- `GET /assistant` - Test AI assistant inputs/outputs
+
+**Scenarios:**
+- Reflected XSS in URL parameters
+- Stored XSS in cart items
+- DOM-based XSS in JavaScript
+- XSS via product names or descriptions
+
+#### 6. Information Disclosure
+**Test Endpoints:**
+- `GET /_healthz`
+- `GET /robots.txt`
+- Error pages (invalid product IDs, etc.)
+- `GET /static/*`
+
+**Scenarios:**
+- Verbose error messages
+- Stack traces in responses
+- Version information disclosure
+- Source code disclosure via static files
+- Internal IP/service discovery
+
+### Configuring AWS Security Agent
+
+When setting up your penetration test in AWS Security Agent:
+
+1. **Start with Primary Targets**:
+   ```
+   https://micro-demo.ops4life.com
+   ```
+
+2. **Provide Application Context**:
+   - Upload Protocol Buffer definitions from `/protos/demo.proto`
+   - Connect GitHub repository for source code context
+   - Provide architecture documentation
+
+3. **Configure Authentication**:
+   - Session-based authentication (shop_session-id cookie)
+   - No login required - sessions auto-generated
+
+4. **Enable Test Categories**:
+   - ✅ Injection attacks
+   - ✅ Authentication/Authorization
+   - ✅ Session management
+   - ✅ Business logic flaws
+   - ✅ XSS/CSRF
+   - ✅ Information disclosure
+
+5. **Set Rate Limiting**:
+   - Start with 10 requests/second
+   - Increase if application handles load well
+
+### Sample Product IDs for Testing
+
+Use these valid product IDs when testing product-related endpoints:
+
+```
+OLJCESPC7Z  # Sunglasses
+66VCHSJNUP  # Tank Top
+1YMWWN1N4O  # Watch
+L9ECAV7KIM  # Loafers
+2ZYFJ3GM2N  # Candle Holder
+0PUK6V6EV0  # Hairdryer
+LS4PSXUNUM  # Salt & Pepper Shakers
+9SIQT8TOJO  # Bamboo Glass Jar
+6E92ZMYYFZ  # Mug
+```
+
+These IDs can be used to test:
+- `/product/{id}` endpoints
+- `/product-meta/{ids}` API
+- Cart add operations with various product combinations
 
 ## Context Gathering
 
@@ -379,6 +821,41 @@ aws ec2 authorize-security-group-ingress \
     --port 80 \
     --cidr 10.0.0.0/16
 ```
+
+### EKS Deployments
+
+For EKS clusters in the same region as Security Agent (us-east-1):
+
+**Security Group Configuration:**
+```bash
+# Find security group for LoadBalancer
+aws elb describe-load-balancers \
+    --region us-east-1 \
+    | jq '.LoadBalancerDescriptions[] | select(.DNSName | contains("frontend")) | .SecurityGroups'
+
+# Ensure security group allows inbound from internet
+aws ec2 describe-security-groups \
+    --group-ids sg-xxxxx \
+    --region us-east-1
+```
+
+**Required Ingress Rules:**
+- Port 80 (HTTP) from 0.0.0.0/0
+- Port 443 (HTTPS) from 0.0.0.0/0
+
+**For Private Endpoint Testing:**
+Since both EKS and Security Agent are in us-east-1, configure VPC settings in Security Agent to access private services:
+- Use the same VPC as your EKS cluster, or
+- Configure VPC peering if using different VPCs within us-east-1
+- Ensure security groups allow traffic between Security Agent and EKS services
+
+**Same-Region Benefits:**
+- EKS Cluster: us-east-1
+- AWS Security Agent: us-east-1
+- Simplified network connectivity
+- Lower latency for testing
+- No cross-region data transfer costs
+- Easier VPC configuration for private testing
 
 ### GKE Private Cluster
 
