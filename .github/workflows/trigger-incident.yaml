@@ -1,0 +1,807 @@
+name: Trigger AWS DevOps Agent Demo Incident
+
+# This workflow artificially triggers production incidents in Online Boutique
+# for demonstrating AWS DevOps Agent's incident response capabilities.
+#
+# Features:
+# - 8 types of realistic incident scenarios
+# - Auto-restore capability after specified duration
+# - Integration with AWS DevOps Agent for investigation
+# - Detailed monitoring and timeline artifacts
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to trigger incident'
+        required: true
+        type: choice
+        options:
+          - dev
+          # qa and prod can be added later after testing
+      incident_type:
+        description: 'Incident type to trigger'
+        required: true
+        type: choice
+        options:
+          - '1 - Frontend High CPU'
+          - '2 - CartService Redis Errors'
+          - '3 - Payment Deployment Regression'
+          - '4 - Currency Service High Latency'
+          - '5 - Recommendation Memory Leak'
+          - '6 - Complete Service Outage'
+          - '7 - Load Generator Overwhelming'
+          - '8 - gRPC Communication Failures'
+      duration_minutes:
+        description: 'Duration to maintain incident (minutes)'
+        required: false
+        default: '15'
+      auto_restore:
+        description: 'Auto-restore to normal after duration'
+        required: false
+        type: boolean
+        default: true
+
+# Inherit environment variables from deploy-k8s-app.yml
+env:
+  KUBECTL_VERSION: '1.34.0'
+  KUSTOMIZE_VERSION: '5.3.0'
+  AWS_REGION: 'ap-southeast-1'
+
+jobs:
+  verify-baseline:
+    name: Verify baseline deployment
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    environment:
+      name: ${{ github.event.inputs.environment }}
+
+    outputs:
+      frontend_url: ${{ steps.get_frontend_url.outputs.url }}
+      cluster_name: ${{ steps.cluster.outputs.name }}
+      incident_number: ${{ steps.parse_incident.outputs.number }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Set EKS Cluster Name
+        id: cluster
+        run: |
+          CLUSTER_NAME="ops4life-${{ github.event.inputs.environment }}-cluster"
+          echo "name=$CLUSTER_NAME" >> $GITHUB_OUTPUT
+          echo "Cluster name: $CLUSTER_NAME"
+
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ secrets.AWS_REGION }} \
+            --name ${{ steps.cluster.outputs.name }}
+
+      - name: Verify Cluster Access
+        run: |
+          echo "Verifying cluster connectivity..."
+          kubectl cluster-info
+          echo ""
+          echo "Cluster nodes:"
+          kubectl get nodes
+
+      - name: Setup Kustomize
+        run: |
+          curl -L "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv${{ env.KUSTOMIZE_VERSION }}/kustomize_v${{ env.KUSTOMIZE_VERSION }}_linux_amd64.tar.gz" \
+            -o kustomize.tar.gz
+          tar -xzf kustomize.tar.gz
+          sudo mv kustomize /usr/local/bin/
+          kustomize version
+
+      - name: Create Namespace
+        run: |
+          if ! kubectl get namespace ${{ github.event.inputs.environment }} &> /dev/null; then
+            echo "Creating namespace ${{ github.event.inputs.environment }}..."
+            kubectl create namespace ${{ github.event.inputs.environment }}
+          else
+            echo "Namespace ${{ github.event.inputs.environment }} already exists"
+          fi
+
+      - name: Parse Incident Type
+        id: parse_incident
+        run: |
+          INCIDENT_TYPE="${{ github.event.inputs.incident_type }}"
+          INCIDENT_NUMBER=$(echo "$INCIDENT_TYPE" | grep -o "^[0-9]*")
+          echo "number=$INCIDENT_NUMBER" >> $GITHUB_OUTPUT
+          echo "Incident number: $INCIDENT_NUMBER"
+
+      - name: Check Online Boutique Deployment
+        id: check_deployment
+        run: |
+          NAMESPACE="${{ github.event.inputs.environment }}"
+
+          if kubectl get deployment -n $NAMESPACE -l app.kubernetes.io/part-of=online-boutique &> /dev/null; then
+            DEPLOYMENT_COUNT=$(kubectl get deployment -n $NAMESPACE -l app.kubernetes.io/part-of=online-boutique --no-headers 2>/dev/null | wc -l)
+            if [ "$DEPLOYMENT_COUNT" -gt 0 ]; then
+              echo "exists=true" >> $GITHUB_OUTPUT
+              echo "Online Boutique is already deployed ($DEPLOYMENT_COUNT services)"
+            else
+              echo "exists=false" >> $GITHUB_OUTPUT
+              echo "Online Boutique is not deployed"
+            fi
+          else
+            echo "exists=false" >> $GITHUB_OUTPUT
+            echo "Online Boutique is not deployed"
+          fi
+
+      - name: Deploy Baseline (if not exists)
+        if: steps.check_deployment.outputs.exists == 'false'
+        run: |
+          NAMESPACE="${{ github.event.inputs.environment }}"
+
+          echo "Deploying Online Boutique to namespace $NAMESPACE..."
+
+          # Create temporary kustomization with namespace override
+          cd kubernetes-manifests
+          cp kustomization.yaml kustomization.yaml.backup
+
+          # Set namespace
+          kustomize edit set namespace $NAMESPACE
+
+          # Add redis-cart and loadgenerator resources
+          if ! grep -q "redis-cart.yaml" kustomization.yaml; then
+            echo " - redis-cart.yaml" >> kustomization.yaml
+          fi
+          if ! grep -q "loadgenerator.yaml" kustomization.yaml; then
+            sed -i 's|# - loadgenerator.yaml| - loadgenerator.yaml|' kustomization.yaml
+          fi
+
+          echo "Kustomization configuration:"
+          cat kustomization.yaml
+
+          # Build and apply
+          kustomize build . | kubectl apply -f -
+
+          # Restore original kustomization
+          mv kustomization.yaml.backup kustomization.yaml
+
+          echo "Waiting for deployments to be ready..."
+
+      - name: Wait for All Pods Ready
+        run: |
+          NAMESPACE="${{ github.event.inputs.environment }}"
+
+          echo "Waiting for all pods to be ready (max 10 minutes)..."
+
+          # Get all deployments
+          DEPLOYMENTS=$(kubectl get deployment -n $NAMESPACE -l app.kubernetes.io/part-of=online-boutique -o name 2>/dev/null || true)
+
+          if [ -z "$DEPLOYMENTS" ]; then
+            echo "Error: No deployments found with label app.kubernetes.io/part-of=online-boutique"
+            exit 1
+          fi
+
+          # Wait for each deployment
+          for DEPLOYMENT in $DEPLOYMENTS; do
+            echo "Waiting for $DEPLOYMENT..."
+            kubectl rollout status $DEPLOYMENT -n $NAMESPACE --timeout=10m
+          done
+
+          echo "All deployments are ready!"
+
+      - name: Verify Pod Status
+        run: |
+          NAMESPACE="${{ github.event.inputs.environment }}"
+
+          echo "Current pod status:"
+          kubectl get pods -n $NAMESPACE -l app.kubernetes.io/part-of=online-boutique
+
+          echo ""
+          echo "Service status:"
+          kubectl get svc -n $NAMESPACE
+
+      - name: Get Frontend URL
+        id: get_frontend_url
+        run: |
+          NAMESPACE="${{ github.event.inputs.environment }}"
+
+          # Get frontend service (LoadBalancer or ClusterIP)
+          FRONTEND_SERVICE=$(kubectl get svc -n $NAMESPACE -l app=frontend -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || echo "")
+
+          if [ -z "$FRONTEND_SERVICE" ]; then
+            echo "Warning: Frontend service not found"
+            echo "url=Not Available" >> $GITHUB_OUTPUT
+          else
+            SERVICE_TYPE=$(kubectl get svc $FRONTEND_SERVICE -n $NAMESPACE -o jsonpath='{.spec.type}')
+
+            if [ "$SERVICE_TYPE" == "LoadBalancer" ]; then
+              FRONTEND_IP=$(kubectl get svc $FRONTEND_SERVICE -n $NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].ip}' 2>/dev/null || echo "")
+              if [ -z "$FRONTEND_IP" ]; then
+                FRONTEND_IP=$(kubectl get svc $FRONTEND_SERVICE -n $NAMESPACE -o jsonpath='{.status.loadBalancer.ingress[0].hostname}' 2>/dev/null || echo "pending")
+              fi
+              echo "url=http://$FRONTEND_IP:8080" >> $GITHUB_OUTPUT
+            else
+              CLUSTER_IP=$(kubectl get svc $FRONTEND_SERVICE -n $NAMESPACE -o jsonpath='{.spec.clusterIP}')
+              echo "url=http://$CLUSTER_IP:8080 (ClusterIP - use port-forward)" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+      - name: Baseline Deployment Summary
+        run: |
+          NAMESPACE="${{ github.event.inputs.environment }}"
+
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Baseline Deployment Status"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Cluster:       ${{ steps.cluster.outputs.name }}"
+          echo "Namespace:     $NAMESPACE"
+          echo "Frontend URL:  ${{ steps.get_frontend_url.outputs.url }}"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+  trigger-incident:
+    name: Trigger ${{ github.event.inputs.incident_type }}
+    needs: verify-baseline
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    environment:
+      name: ${{ github.event.inputs.environment }}
+
+    outputs:
+      incident_start_time: ${{ steps.trigger.outputs.start_time }}
+      commands_executed: ${{ steps.trigger.outputs.commands }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ secrets.AWS_REGION }} \
+            --name ${{ needs.verify-baseline.outputs.cluster_name }}
+
+      - name: Execute Incident Trigger
+        id: trigger
+        run: |
+          NAMESPACE="${{ github.event.inputs.environment }}"
+          INCIDENT_NUMBER="${{ needs.verify-baseline.outputs.incident_number }}"
+          START_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          echo "start_time=$START_TIME" >> $GITHUB_OUTPUT
+
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Triggering Incident: ${{ github.event.inputs.incident_type }}"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Start Time: $START_TIME"
+          echo "Namespace:  $NAMESPACE"
+          echo ""
+
+          COMMANDS_EXECUTED=""
+
+          case $INCIDENT_NUMBER in
+            1)
+              echo "=== Incident 1: Frontend High CPU ==="
+              echo "Scaling load generator to create high CPU load..."
+
+              CMD1="kubectl scale deployment/loadgenerator --replicas=10 -n $NAMESPACE"
+              echo "Executing: $CMD1"
+              eval $CMD1
+              COMMANDS_EXECUTED="$CMD1"
+
+              CMD2="kubectl set env deployment/loadgenerator USERS=1000 RATE=50 -n $NAMESPACE"
+              echo "Executing: $CMD2"
+              eval $CMD2
+              COMMANDS_EXECUTED="$COMMANDS_EXECUTED; $CMD2"
+
+              echo ""
+              echo "Expected symptoms:"
+              echo "- Frontend CPU: 90-95%"
+              echo "- Response time: 200ms → 3000ms"
+              echo "- High request rate"
+              ;;
+
+            2)
+              echo "=== Incident 2: CartService Redis Errors ==="
+              echo "Reducing Redis memory to trigger OOMKill..."
+
+              CMD1="kubectl set resources deployment/redis-cart --limits=memory=64Mi -n $NAMESPACE"
+              echo "Executing: $CMD1"
+              eval $CMD1
+              COMMANDS_EXECUTED="$CMD1"
+
+              echo ""
+              echo "Waiting for Redis pod to restart..."
+              sleep 10
+
+              echo "Expected symptoms:"
+              echo "- Cart operations failing"
+              echo "- Redis connection errors"
+              echo "- OOMKilled events"
+              ;;
+
+            3)
+              echo "=== Incident 3: Payment Deployment Regression ==="
+              echo "Injecting payment errors via environment variable..."
+
+              CMD1="kubectl set env deployment/paymentservice ERROR_INJECTION_RATE=0.45 -n $NAMESPACE"
+              echo "Executing: $CMD1"
+              eval $CMD1
+              COMMANDS_EXECUTED="$CMD1"
+
+              echo ""
+              echo "Waiting for deployment rollout..."
+              kubectl rollout status deployment/paymentservice -n $NAMESPACE --timeout=3m
+
+              echo "Expected symptoms:"
+              echo "- Payment failure rate: 45%"
+              echo "- Users cannot complete checkout"
+              echo "- Error logs in paymentservice"
+              ;;
+
+            4)
+              echo "=== Incident 4: Currency Service High Latency ==="
+              echo "Injecting artificial latency..."
+
+              CMD1="kubectl set env deployment/currencyservice ARTIFICIAL_LATENCY_MS=8000 -n $NAMESPACE"
+              echo "Executing: $CMD1"
+              eval $CMD1
+              COMMANDS_EXECUTED="$CMD1"
+
+              echo ""
+              echo "Waiting for deployment rollout..."
+              kubectl rollout status deployment/currencyservice -n $NAMESPACE --timeout=3m
+
+              echo "Expected symptoms:"
+              echo "- Checkout latency: 2s → 15s"
+              echo "- Currency conversion timeouts"
+              echo "- Slow page loads"
+              ;;
+
+            5)
+              echo "=== Incident 5: Recommendation Memory Leak ==="
+              echo "Reducing memory limit to trigger OOMKill..."
+
+              CMD1="kubectl set resources deployment/recommendationservice --limits=memory=64Mi -n $NAMESPACE"
+              echo "Executing: $CMD1"
+              eval $CMD1
+              COMMANDS_EXECUTED="$CMD1"
+
+              echo ""
+              echo "Waiting for pod restart..."
+              sleep 15
+
+              echo "Expected symptoms:"
+              echo "- Frequent pod restarts"
+              echo "- OOMKilled events"
+              echo "- Recommendation feature intermittent"
+              ;;
+
+            6)
+              echo "=== Incident 6: Complete Service Outage ==="
+              echo "Applying deny-all NetworkPolicy..."
+
+              cat <<EOF | kubectl apply -n $NAMESPACE -f -
+          apiVersion: networking.k8s.io/v1
+          kind: NetworkPolicy
+          metadata:
+            name: deny-all-ingress-incident
+          spec:
+            podSelector: {}
+            policyTypes:
+            - Ingress
+          EOF
+
+              COMMANDS_EXECUTED="kubectl apply NetworkPolicy deny-all-ingress-incident"
+
+              echo ""
+              echo "Expected symptoms:"
+              echo "- All services return 503"
+              echo "- Frontend unreachable"
+              echo "- All CloudWatch alarms critical"
+              ;;
+
+            7)
+              echo "=== Incident 7: Load Generator Overwhelming System ==="
+              echo "Scaling load generator to extreme levels..."
+
+              CMD1="kubectl scale deployment/loadgenerator --replicas=20 -n $NAMESPACE"
+              echo "Executing: $CMD1"
+              eval $CMD1
+              COMMANDS_EXECUTED="$CMD1"
+
+              CMD2="kubectl set env deployment/loadgenerator USERS=5000 RATE=100 -n $NAMESPACE"
+              echo "Executing: $CMD2"
+              eval $CMD2
+              COMMANDS_EXECUTED="$COMMANDS_EXECUTED; $CMD2"
+
+              echo ""
+              echo "Expected symptoms:"
+              echo "- System-wide high CPU/memory"
+              echo "- All services showing latency"
+              echo "- Request rate: 10x normal"
+              ;;
+
+            8)
+              echo "=== Incident 8: gRPC Communication Failures ==="
+              echo "Creating NetworkPolicy to block gRPC traffic..."
+
+              cat <<EOF | kubectl apply -n $NAMESPACE -f -
+          apiVersion: networking.k8s.io/v1
+          kind: NetworkPolicy
+          metadata:
+            name: block-grpc-incident
+          spec:
+            podSelector:
+              matchLabels:
+                app: productcatalogservice
+            policyTypes:
+            - Ingress
+            ingress:
+            - from:
+              - podSelector:
+                  matchLabels:
+                    app: nonexistent
+          EOF
+
+              COMMANDS_EXECUTED="kubectl apply NetworkPolicy block-grpc-incident"
+
+              echo ""
+              echo "Expected symptoms:"
+              echo "- Frontend errors calling productcatalogservice"
+              echo "- gRPC connection refused"
+              echo "- Service mesh errors"
+              ;;
+
+            *)
+              echo "Error: Unknown incident number: $INCIDENT_NUMBER"
+              exit 1
+              ;;
+          esac
+
+          echo "commands=$COMMANDS_EXECUTED" >> $GITHUB_OUTPUT
+
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Incident triggered successfully!"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+      - name: Verify Incident Active
+        run: |
+          NAMESPACE="${{ github.event.inputs.environment }}"
+          INCIDENT_NUMBER="${{ needs.verify-baseline.outputs.incident_number }}"
+
+          echo "Verifying incident is active..."
+          echo ""
+
+          case $INCIDENT_NUMBER in
+            1|7)
+              echo "Load generator status:"
+              kubectl get deployment/loadgenerator -n $NAMESPACE
+              kubectl get pods -n $NAMESPACE -l app=loadgenerator
+              ;;
+            2)
+              echo "Redis pod status:"
+              kubectl get pods -n $NAMESPACE -l app=redis-cart
+              kubectl describe pod -n $NAMESPACE -l app=redis-cart | grep -A 5 "Events:" || true
+              ;;
+            3)
+              echo "Payment service status:"
+              kubectl get deployment/paymentservice -n $NAMESPACE
+              kubectl get pods -n $NAMESPACE -l app=paymentservice
+              ;;
+            4)
+              echo "Currency service status:"
+              kubectl get deployment/currencyservice -n $NAMESPACE
+              kubectl get pods -n $NAMESPACE -l app=currencyservice
+              ;;
+            5)
+              echo "Recommendation service status:"
+              kubectl get pods -n $NAMESPACE -l app=recommendationservice
+              ;;
+            6)
+              echo "Network policy status:"
+              kubectl get networkpolicy -n $NAMESPACE
+              ;;
+            8)
+              echo "Network policy status:"
+              kubectl get networkpolicy -n $NAMESPACE
+              kubectl get pods -n $NAMESPACE -l app=productcatalogservice
+              ;;
+          esac
+
+      - name: Post Incident Summary
+        run: |
+          NAMESPACE="${{ github.event.inputs.environment }}"
+          FRONTEND_URL="${{ needs.verify-baseline.outputs.frontend_url }}"
+          CLUSTER_NAME="${{ needs.verify-baseline.outputs.cluster_name }}"
+
+          cat <<EOF >> $GITHUB_STEP_SUMMARY
+          ## 🚨 Incident Triggered: ${{ github.event.inputs.incident_type }}
+
+          **Start Time:** ${{ steps.trigger.outputs.start_time }}
+          **Duration:** ${{ github.event.inputs.duration_minutes }} minutes
+          **Auto-restore:** ${{ github.event.inputs.auto_restore }}
+
+          ### Environment Details
+          - **Cluster:** $CLUSTER_NAME
+          - **Namespace:** $NAMESPACE
+          - **Frontend URL:** $FRONTEND_URL
+
+          ### Commands Executed
+          \`\`\`bash
+          ${{ steps.trigger.outputs.commands }}
+          \`\`\`
+
+          ### Monitoring Links
+          - [Frontend Application]($FRONTEND_URL)
+          - [CloudWatch Container Insights](https://console.aws.amazon.com/cloudwatch/home?region=${{ secrets.AWS_REGION }}#container-insights:infrastructure/map?~(query~(controls~(CW*3a*3aEKS.cluster~(~'$CLUSTER_NAME)~CW*3a*3aKubernetes.namespace~(~'$NAMESPACE)))))
+          - [EKS Cluster Console](https://console.aws.amazon.com/eks/home?region=${{ secrets.AWS_REGION }}#/clusters/$CLUSTER_NAME)
+
+          ### Investigation Steps
+          1. Check AWS DevOps Agent investigation tab
+          2. Review CloudWatch metrics for affected services
+          3. Examine pod logs: \`kubectl logs -n $NAMESPACE -l app=<service>\`
+          4. Check recent events: \`kubectl get events -n $NAMESPACE --sort-by='.lastTimestamp'\`
+
+          ### Quick Mitigation Commands
+          Access the cluster:
+          \`\`\`bash
+          aws eks update-kubeconfig --region ${{ secrets.AWS_REGION }} --name $CLUSTER_NAME
+          kubectl config set-context --current --namespace=$NAMESPACE
+          \`\`\`
+
+          ---
+
+          **Incident will auto-restore at:** $(date -u -d "+${{ github.event.inputs.duration_minutes }} minutes" +"%Y-%m-%d %H:%M:%S UTC" 2>/dev/null || echo "N/A")
+          EOF
+
+  monitor-incident:
+    name: Monitor incident
+    needs: [verify-baseline, trigger-incident]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Monitor Incident Duration
+        run: |
+          DURATION_MINUTES="${{ github.event.inputs.duration_minutes }}"
+          DURATION_SECONDS=$((DURATION_MINUTES * 60))
+          CHECK_INTERVAL=120  # Check every 2 minutes
+
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Monitoring Incident"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Duration: $DURATION_MINUTES minutes ($DURATION_SECONDS seconds)"
+          echo "Check interval: $CHECK_INTERVAL seconds"
+          echo ""
+
+          ELAPSED=0
+          while [ $ELAPSED -lt $DURATION_SECONDS ]; do
+            REMAINING=$((DURATION_SECONDS - ELAPSED))
+            REMAINING_MINUTES=$((REMAINING / 60))
+
+            echo "[$(date -u +"%Y-%m-%d %H:%M:%S UTC")] Incident active - $REMAINING_MINUTES minutes remaining"
+
+            if [ $REMAINING -lt $CHECK_INTERVAL ]; then
+              sleep $REMAINING
+              ELAPSED=$DURATION_SECONDS
+            else
+              sleep $CHECK_INTERVAL
+              ELAPSED=$((ELAPSED + CHECK_INTERVAL))
+            fi
+          done
+
+          echo ""
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Monitoring period complete!"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+
+      - name: Create Incident Timeline
+        run: |
+          START_TIME="${{ needs.trigger-incident.outputs.incident_start_time }}"
+          END_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+          mkdir -p /tmp/incident-artifacts
+
+          cat <<EOF > /tmp/incident-artifacts/incident-timeline.json
+          {
+            "incident_type": "${{ github.event.inputs.incident_type }}",
+            "incident_number": "${{ needs.verify-baseline.outputs.incident_number }}",
+            "start_time": "$START_TIME",
+            "end_time": "$END_TIME",
+            "duration_minutes": "${{ github.event.inputs.duration_minutes }}",
+            "namespace": "${{ github.event.inputs.environment }}",
+            "cluster": "${{ needs.verify-baseline.outputs.cluster_name }}",
+            "triggered_by": "${{ github.actor }}",
+            "workflow_run": "${{ github.run_id }}",
+            "commands_executed": "${{ needs.trigger-incident.outputs.commands }}",
+            "auto_restore": "${{ github.event.inputs.auto_restore }}",
+            "frontend_url": "${{ needs.verify-baseline.outputs.frontend_url }}"
+          }
+          EOF
+
+          echo "Incident timeline artifact created:"
+          cat /tmp/incident-artifacts/incident-timeline.json
+
+      - name: Upload Incident Timeline
+        uses: actions/upload-artifact@v6
+        with:
+          name: incident-timeline-${{ github.event.inputs.environment }}-${{ github.run_number }}
+          path: /tmp/incident-artifacts/
+          retention-days: 90
+
+  restore-environment:
+    name: Restore to normal
+    needs: [verify-baseline, trigger-incident, monitor-incident]
+    if: github.event.inputs.auto_restore == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    environment:
+      name: ${{ github.event.inputs.environment }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v5
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ secrets.AWS_REGION }}
+
+      - name: Configure kubectl
+        run: |
+          aws eks update-kubeconfig \
+            --region ${{ secrets.AWS_REGION }} \
+            --name ${{ needs.verify-baseline.outputs.cluster_name }}
+
+      - name: Restore Configuration
+        run: |
+          NAMESPACE="${{ github.event.inputs.environment }}"
+          INCIDENT_NUMBER="${{ needs.verify-baseline.outputs.incident_number }}"
+
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Restoring Environment to Normal"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Incident: ${{ github.event.inputs.incident_type }}"
+          echo "Namespace: $NAMESPACE"
+          echo ""
+
+          case $INCIDENT_NUMBER in
+            1)
+              echo "=== Restoring from Frontend High CPU ==="
+              kubectl scale deployment/loadgenerator --replicas=1 -n $NAMESPACE
+              kubectl set env deployment/loadgenerator USERS=10 RATE=1 -n $NAMESPACE
+              ;;
+
+            2)
+              echo "=== Restoring from CartService Redis Errors ==="
+              kubectl set resources deployment/redis-cart --limits=memory=256Mi -n $NAMESPACE
+              kubectl rollout status deployment/redis-cart -n $NAMESPACE --timeout=5m
+              ;;
+
+            3)
+              echo "=== Restoring from Payment Deployment Regression ==="
+              kubectl set env deployment/paymentservice ERROR_INJECTION_RATE- -n $NAMESPACE
+              kubectl rollout status deployment/paymentservice -n $NAMESPACE --timeout=5m
+              ;;
+
+            4)
+              echo "=== Restoring from Currency Service High Latency ==="
+              kubectl set env deployment/currencyservice ARTIFICIAL_LATENCY_MS- -n $NAMESPACE
+              kubectl rollout status deployment/currencyservice -n $NAMESPACE --timeout=5m
+              ;;
+
+            5)
+              echo "=== Restoring from Recommendation Memory Leak ==="
+              kubectl set resources deployment/recommendationservice --limits=memory=220Mi -n $NAMESPACE
+              kubectl rollout restart deployment/recommendationservice -n $NAMESPACE
+              kubectl rollout status deployment/recommendationservice -n $NAMESPACE --timeout=5m
+              ;;
+
+            6)
+              echo "=== Restoring from Complete Service Outage ==="
+              kubectl delete networkpolicy deny-all-ingress-incident -n $NAMESPACE
+              ;;
+
+            7)
+              echo "=== Restoring from Load Generator Overwhelming ==="
+              kubectl scale deployment/loadgenerator --replicas=1 -n $NAMESPACE
+              kubectl set env deployment/loadgenerator USERS=10 RATE=1 -n $NAMESPACE
+              ;;
+
+            8)
+              echo "=== Restoring from gRPC Communication Failures ==="
+              kubectl delete networkpolicy block-grpc-incident -n $NAMESPACE
+              ;;
+
+            *)
+              echo "Error: Unknown incident number: $INCIDENT_NUMBER"
+              exit 1
+              ;;
+          esac
+
+          echo ""
+          echo "Restoration commands executed successfully!"
+
+      - name: Wait for Stabilization
+        run: |
+          NAMESPACE="${{ github.event.inputs.environment }}"
+
+          echo "Waiting for services to stabilize (60 seconds)..."
+          sleep 60
+
+          echo ""
+          echo "Checking pod status..."
+          kubectl get pods -n $NAMESPACE -l app.kubernetes.io/part-of=online-boutique
+
+      - name: Verify Restoration
+        run: |
+          NAMESPACE="${{ github.event.inputs.environment }}"
+
+          echo "Verifying all pods are ready..."
+
+          # Count total pods and ready pods
+          TOTAL_PODS=$(kubectl get pods -n $NAMESPACE -l app.kubernetes.io/part-of=online-boutique --no-headers 2>/dev/null | wc -l)
+          READY_PODS=$(kubectl get pods -n $NAMESPACE -l app.kubernetes.io/part-of=online-boutique --no-headers 2>/dev/null | grep "Running" | grep -E "([0-9]+)/\1" | wc -l)
+
+          echo "Ready pods: $READY_PODS / $TOTAL_PODS"
+
+          if [ "$READY_PODS" -eq "$TOTAL_PODS" ] && [ "$TOTAL_PODS" -gt 0 ]; then
+            echo "✓ All pods are ready!"
+          else
+            echo "⚠ Warning: Not all pods are ready yet"
+            kubectl get pods -n $NAMESPACE -l app.kubernetes.io/part-of=online-boutique
+          fi
+
+      - name: Restoration Summary
+        run: |
+          NAMESPACE="${{ github.event.inputs.environment }}"
+          FRONTEND_URL="${{ needs.verify-baseline.outputs.frontend_url }}"
+
+          cat <<EOF >> $GITHUB_STEP_SUMMARY
+          ## ✅ Environment Restored
+
+          **Restoration Time:** $(date -u +"%Y-%m-%d %H:%M:%S UTC")
+          **Incident Duration:** ${{ github.event.inputs.duration_minutes }} minutes
+
+          ### Final Status
+          - **Namespace:** $NAMESPACE
+          - **Frontend URL:** $FRONTEND_URL
+          - **All Services:** Restored to baseline configuration
+
+          ### Pod Status
+          \`\`\`
+          $(kubectl get pods -n $NAMESPACE -l app.kubernetes.io/part-of=online-boutique 2>/dev/null || echo "Unable to fetch pod status")
+          \`\`\`
+
+          ### Next Steps
+          1. Verify frontend is accessible: $FRONTEND_URL
+          2. Check AWS DevOps Agent investigation results
+          3. Review incident timeline artifact
+          4. Document learnings and improvements
+
+          ---
+
+          **Incident Response Demo Complete!**
+          EOF
+
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+          echo "Environment Restoration Complete!"
+          echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
