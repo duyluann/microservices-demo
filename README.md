@@ -138,6 +138,14 @@ Find **Protocol Buffers Descriptions** at the [`./protos` directory](/protos).
 
 - [Development](/docs/development-guide.md) to learn how to run and develop this app locally.
 
+## Operational Excellence
+
+- [AWS Security Agent Setup](/docs/aws-security-agent-guide.md) - Security assessment and penetration testing
+- [AWS DevOps Agent Setup](/docs/aws-devops-agent-guide.md) - Autonomous incident response and root cause analysis
+- [AWS DevOps Agent Incident Scenarios](/docs/aws-devops-agent-incident-scenarios.md) - Common incident patterns and investigation workflows
+- [AWS DevOps Agent Deployment Integration](/docs/aws-devops-agent-deployment-integration.md) - Enhanced observability and deployment tracking
+- [AWS DevOps Agent Prevention Guide](/docs/aws-devops-agent-prevention.md) - Proactive reliability improvements
+
 ## Demos featuring Online Boutique
 
 - [Security hardening of the OnlineBoutique sample apps with the Docker Hardened Images (DHI)](https://medium.com/google-cloud/security-hardening-of-the-onlineboutique-sample-apps-with-docker-hardened-images-dhi-ca1fad348343)
