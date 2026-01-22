@@ -96,12 +96,15 @@ jobs:
           kubectl get nodes
 
       - name: Setup Kustomize
-        run: |
-          curl -L "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv${{ env.KUSTOMIZE_VERSION }}/kustomize_v${{ env.KUSTOMIZE_VERSION }}_linux_amd64.tar.gz" \
-            -o kustomize.tar.gz
-          tar -xzf kustomize.tar.gz
-          sudo mv kustomize /usr/local/bin/
-          kustomize version
+        uses: imranismail/setup-kustomize@v2
+
+      # - name: Setup Kustomize
+      #   run: |
+      #     curl -L "https://github.com/kubernetes-sigs/kustomize/releases/download/kustomize%2Fv${{ env.KUSTOMIZE_VERSION }}/kustomize_v${{ env.KUSTOMIZE_VERSION }}_linux_amd64.tar.gz" \
+      #       -o kustomize.tar.gz
+      #     tar -xzf kustomize.tar.gz
+      #     sudo mv kustomize /usr/local/bin/
+      #     kustomize version
 
       - name: Create Namespace
         run: |
