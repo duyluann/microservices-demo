@@ -1,0 +1,896 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: |
+  AWS DevOps Agent Demo - ALB Health Check Failures
+  This template creates an ALB with EC2 instances that can simulate health check failures.
+  Use this to demonstrate AWS DevOps Agent's root cause analysis capabilities.
+
+Parameters:
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    Description: EC2 instance type
+
+  KeyPairName:
+    Type: String
+    Default: ""
+    Description: (Optional) EC2 Key Pair for SSH access
+
+  EnvironmentTag:
+    Type: String
+    Default: devops-agent-demo
+    Description: Tag value for DevOps Agent resource discovery
+
+Conditions:
+  HasKeyPair: !Not [!Equals [!Ref KeyPairName, ""]]
+
+Mappings:
+  RegionAMI:
+    us-east-1:
+      AMI: ami-0c7217cdde317cfec # Amazon Linux 2023
+    us-west-2:
+      AMI: ami-0b20a6f09484773af # Amazon Linux 2023
+    ap-southeast-1:
+      AMI: ami-0497a974f8d5dcef8 # Amazon Linux 2023
+    ap-northeast-1:
+      AMI: ami-0bdd6c3c5a0f87f18 # Amazon Linux 2023
+    eu-west-1:
+      AMI: ami-0d0bf8cae4e19a1c6 # Amazon Linux 2023
+    eu-central-1:
+      AMI: ami-0039da1f3917fa8e3 # Amazon Linux 2023
+
+Resources:
+  # ==================== VPC & NETWORKING ====================
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-vpc
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-igw
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-public-1
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-public-2
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-public-rt
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  SubnetRouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  # ==================== SECURITY GROUPS ====================
+  ALBSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for ALB
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-alb-sg
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+
+  EC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for EC2 instances
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref ALBSecurityGroup
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-ec2-sg
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+
+  # ==================== IAM ROLE ====================
+  EC2InstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+
+  EC2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref EC2InstanceRole
+
+  # ==================== APPLICATION LOAD BALANCER ====================
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub ${AWS::StackName}-alb
+      Scheme: internet-facing
+      Type: application
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      SecurityGroups:
+        - !Ref ALBSecurityGroup
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+
+  ALBTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub ${AWS::StackName}-tg
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref VPC
+      TargetType: instance
+      HealthCheckEnabled: true
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /health
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 10
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      Matcher:
+        HttpCode: 200
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "30"
+        - Key: stickiness.enabled
+          Value: "false"
+      Targets:
+        - Id: !Ref EC2Instance1
+          Port: 80
+        - Id: !Ref EC2Instance2
+          Port: 80
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+
+  ALBListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref ALBTargetGroup
+
+  # ==================== EC2 INSTANCES ====================
+  EC2Instance1:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - SubnetRouteTableAssociation1
+      - AttachGateway
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !FindInMap [RegionAMI, !Ref "AWS::Region", AMI]
+      SubnetId: !Ref PublicSubnet1
+      SecurityGroupIds:
+        - !Ref EC2SecurityGroup
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      KeyName: !If [HasKeyPair, !Ref KeyPairName, !Ref "AWS::NoValue"]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # Logging
+          exec > >(tee /var/log/user-data.log)
+          exec 2>&1
+
+          echo "Starting UserData script at $(date)"
+
+          # Update system (don't fail if this has issues)
+          yum update -y || echo "yum update had some issues, continuing..."
+          yum install -y python3 python3-pip jq curl
+
+          # Create application directory
+          mkdir -p /opt/webapp
+          cd /opt/webapp
+
+          # Create a simple HTTP server using Python's built-in modules
+          cat > app.py << 'APPEOF'
+          #!/usr/bin/env python3
+          from http.server import HTTPServer, BaseHTTPRequestHandler
+          import json
+          import os
+          import sys
+          import threading
+          import time
+          from datetime import datetime
+
+          # Health status control (shared state)
+          health_status = {"healthy": True, "reason": "OK"}
+
+          class WebHandler(BaseHTTPRequestHandler):
+              def log_message(self, format, *args):
+                  sys.stdout.write("%s - - [%s] %s\n" %
+                                   (self.address_string(),
+                                    self.log_date_time_string(),
+                                    format%args))
+                  sys.stdout.flush()
+
+              def send_json_response(self, status_code, data):
+                  self.send_response(status_code)
+                  self.send_header('Content-Type', 'application/json')
+                  self.end_headers()
+                  self.wfile.write(json.dumps(data).encode())
+
+              def do_GET(self):
+                  if self.path == '/':
+                      self.send_json_response(200, {
+                          "service": "demo-webapp",
+                          "instance": os.environ.get('INSTANCE_ID', 'unknown'),
+                          "status": "running"
+                      })
+
+                  elif self.path == '/health':
+                      if health_status["healthy"]:
+                          self.send_json_response(200, {"status": "healthy"})
+                      else:
+                          self.send_json_response(503, {
+                              "status": "unhealthy",
+                              "reason": health_status["reason"]
+                          })
+
+                  elif self.path == '/status':
+                      self.send_json_response(200, health_status)
+
+                  elif self.path == '/simulate/unhealthy':
+                      health_status["healthy"] = False
+                      health_status["reason"] = "Simulated database connection failure"
+                      print(f"[{datetime.now()}] Simulated unhealthy state triggered")
+                      self.send_json_response(200, {
+                          "message": "Health check will now fail",
+                          "reason": health_status["reason"]
+                      })
+
+                  elif self.path == '/simulate/healthy':
+                      health_status["healthy"] = True
+                      health_status["reason"] = "OK"
+                      print(f"[{datetime.now()}] Restored to healthy state")
+                      self.send_json_response(200, {
+                          "message": "Health check restored to healthy"
+                      })
+
+                  elif self.path == '/simulate/crash':
+                      def delayed_crash():
+                          time.sleep(5)
+                          print(f"[{datetime.now()}] Simulated crash - exiting")
+                          os._exit(1)
+                      threading.Thread(target=delayed_crash, daemon=True).start()
+                      self.send_json_response(200, {
+                          "message": "Application will crash in 5 seconds"
+                      })
+
+                  elif self.path == '/simulate/slow-health':
+                      health_status["healthy"] = False
+                      health_status["reason"] = "Health check timeout simulation"
+                      print(f"[{datetime.now()}] Simulated slow health check")
+                      self.send_json_response(200, {
+                          "message": "Health checks will now be slow/timeout"
+                      })
+
+                  else:
+                      self.send_response(404)
+                      self.end_headers()
+                      self.wfile.write(b'Not Found')
+
+          if __name__ == '__main__':
+              port = 80
+              server_address = ('0.0.0.0', port)
+              httpd = HTTPServer(server_address, WebHandler)
+              print(f"[{datetime.now()}] Starting HTTP server on 0.0.0.0:{port}")
+              print(f"[{datetime.now()}] Instance ID: {os.environ.get('INSTANCE_ID', 'unknown')}")
+              sys.stdout.flush()
+              try:
+                  httpd.serve_forever()
+              except KeyboardInterrupt:
+                  print(f"\n[{datetime.now()}] Server stopped")
+                  sys.exit(0)
+              except Exception as e:
+                  print(f"[{datetime.now()}] ERROR: {e}")
+                  sys.exit(1)
+          APPEOF
+
+          # Make app executable
+          chmod +x /opt/webapp/app.py
+
+          # Test the script syntax
+          echo "Validating Python script..."
+          python3 -m py_compile /opt/webapp/app.py
+          if [ $? -eq 0 ]; then
+            echo "Python script is valid"
+          else
+            echo "ERROR: Python script has syntax errors"
+            cat /opt/webapp/app.py
+            exit 1
+          fi
+
+          # Get instance ID
+          echo "Getting instance ID..."
+          TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" 2>/dev/null)
+          INSTANCE_ID=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null)
+          export INSTANCE_ID
+          echo "Instance ID: $INSTANCE_ID"
+
+          # Create systemd service
+          cat > /etc/systemd/system/webapp.service << EOF
+          [Unit]
+          Description=Demo Web Application
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User=root
+          Environment=INSTANCE_ID=$INSTANCE_ID
+          Environment=PYTHONUNBUFFERED=1
+          WorkingDirectory=/opt/webapp
+          ExecStart=/usr/bin/python3 /opt/webapp/app.py
+          StandardOutput=journal
+          StandardError=journal
+          SyslogIdentifier=webapp
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          echo "Systemd service file created"
+
+          # Create helper scripts
+          cat > /opt/webapp/trigger-unhealthy.sh << 'EOF'
+          #!/bin/bash
+          curl -s http://localhost/simulate/unhealthy
+          echo ""
+          echo "Health check will now fail. ALB will mark instance as unhealthy."
+          EOF
+          chmod +x /opt/webapp/trigger-unhealthy.sh
+
+          cat > /opt/webapp/trigger-crash.sh << 'EOF'
+          #!/bin/bash
+          curl -s http://localhost/simulate/crash
+          echo ""
+          echo "Application will crash in 5 seconds."
+          EOF
+          chmod +x /opt/webapp/trigger-crash.sh
+
+          cat > /opt/webapp/restore-healthy.sh << 'EOF'
+          #!/bin/bash
+          curl -s http://localhost/simulate/healthy
+          echo ""
+          echo "Health check restored to healthy."
+          EOF
+          chmod +x /opt/webapp/restore-healthy.sh
+
+          # Start service
+          echo "Starting webapp service..."
+          systemctl daemon-reload
+          systemctl enable webapp
+          systemctl start webapp
+
+          # Wait for service to start
+          sleep 3
+
+          # Verify service is running
+          if systemctl is-active --quiet webapp; then
+            echo "Webapp service is running"
+          else
+            echo "ERROR: Webapp service failed to start"
+            journalctl -u webapp -n 50
+          fi
+
+          # Verify the app responds
+          for i in {1..10}; do
+            if curl -s http://localhost/health > /dev/null 2>&1; then
+              echo "Health check endpoint is responding"
+              break
+            else
+              echo "Waiting for app to respond (attempt $i/10)..."
+              sleep 2
+            fi
+          done
+
+          # Signal completion
+          echo "Setup complete at $(date)" > /opt/webapp/setup-complete
+          echo "UserData script completed successfully"
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-instance-1
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+        - Key: Application
+          Value: demo-webapp
+
+  EC2Instance2:
+    Type: AWS::EC2::Instance
+    DependsOn:
+      - SubnetRouteTableAssociation2
+      - AttachGateway
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !FindInMap [RegionAMI, !Ref "AWS::Region", AMI]
+      SubnetId: !Ref PublicSubnet2
+      SecurityGroupIds:
+        - !Ref EC2SecurityGroup
+      IamInstanceProfile: !Ref EC2InstanceProfile
+      KeyName: !If [HasKeyPair, !Ref KeyPairName, !Ref "AWS::NoValue"]
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          # Logging
+          exec > >(tee /var/log/user-data.log)
+          exec 2>&1
+
+          echo "Starting UserData script at $(date)"
+
+          # Update system (don't fail if this has issues)
+          yum update -y || echo "yum update had some issues, continuing..."
+          yum install -y python3 python3-pip jq curl
+
+          # Create application directory
+          mkdir -p /opt/webapp
+          cd /opt/webapp
+
+          # Create a simple HTTP server using Python's built-in modules (same as Instance 1)
+          cat > app.py << 'APPEOF'
+          #!/usr/bin/env python3
+          from http.server import HTTPServer, BaseHTTPRequestHandler
+          import json
+          import os
+          import sys
+          import threading
+          import time
+          from datetime import datetime
+
+          # Health status control (shared state)
+          health_status = {"healthy": True, "reason": "OK"}
+
+          class WebHandler(BaseHTTPRequestHandler):
+              def log_message(self, format, *args):
+                  sys.stdout.write("%s - - [%s] %s\n" %
+                                   (self.address_string(),
+                                    self.log_date_time_string(),
+                                    format%args))
+                  sys.stdout.flush()
+
+              def send_json_response(self, status_code, data):
+                  self.send_response(status_code)
+                  self.send_header('Content-Type', 'application/json')
+                  self.end_headers()
+                  self.wfile.write(json.dumps(data).encode())
+
+              def do_GET(self):
+                  if self.path == '/':
+                      self.send_json_response(200, {
+                          "service": "demo-webapp",
+                          "instance": os.environ.get('INSTANCE_ID', 'unknown'),
+                          "status": "running"
+                      })
+
+                  elif self.path == '/health':
+                      if health_status["healthy"]:
+                          self.send_json_response(200, {"status": "healthy"})
+                      else:
+                          self.send_json_response(503, {
+                              "status": "unhealthy",
+                              "reason": health_status["reason"]
+                          })
+
+                  elif self.path == '/status':
+                      self.send_json_response(200, health_status)
+
+                  elif self.path == '/simulate/unhealthy':
+                      health_status["healthy"] = False
+                      health_status["reason"] = "Simulated database connection failure"
+                      print(f"[{datetime.now()}] Simulated unhealthy state triggered")
+                      self.send_json_response(200, {
+                          "message": "Health check will now fail",
+                          "reason": health_status["reason"]
+                      })
+
+                  elif self.path == '/simulate/healthy':
+                      health_status["healthy"] = True
+                      health_status["reason"] = "OK"
+                      print(f"[{datetime.now()}] Restored to healthy state")
+                      self.send_json_response(200, {
+                          "message": "Health check restored to healthy"
+                      })
+
+                  elif self.path == '/simulate/crash':
+                      def delayed_crash():
+                          time.sleep(5)
+                          print(f"[{datetime.now()}] Simulated crash - exiting")
+                          os._exit(1)
+                      threading.Thread(target=delayed_crash, daemon=True).start()
+                      self.send_json_response(200, {
+                          "message": "Application will crash in 5 seconds"
+                      })
+
+                  elif self.path == '/simulate/slow-health':
+                      health_status["healthy"] = False
+                      health_status["reason"] = "Health check timeout simulation"
+                      print(f"[{datetime.now()}] Simulated slow health check")
+                      self.send_json_response(200, {
+                          "message": "Health checks will now be slow/timeout"
+                      })
+
+                  else:
+                      self.send_response(404)
+                      self.end_headers()
+                      self.wfile.write(b'Not Found')
+
+          if __name__ == '__main__':
+              port = 80
+              server_address = ('0.0.0.0', port)
+              httpd = HTTPServer(server_address, WebHandler)
+              print(f"[{datetime.now()}] Starting HTTP server on 0.0.0.0:{port}")
+              print(f"[{datetime.now()}] Instance ID: {os.environ.get('INSTANCE_ID', 'unknown')}")
+              sys.stdout.flush()
+              try:
+                  httpd.serve_forever()
+              except KeyboardInterrupt:
+                  print(f"\n[{datetime.now()}] Server stopped")
+                  sys.exit(0)
+              except Exception as e:
+                  print(f"[{datetime.now()}] ERROR: {e}")
+                  sys.exit(1)
+          APPEOF
+
+          # Make app executable
+          chmod +x /opt/webapp/app.py
+
+          # Test the script syntax
+          echo "Validating Python script..."
+          python3 -m py_compile /opt/webapp/app.py
+          if [ $? -eq 0 ]; then
+            echo "Python script is valid"
+          else
+            echo "ERROR: Python script has syntax errors"
+            cat /opt/webapp/app.py
+            exit 1
+          fi
+
+          # Get instance ID
+          echo "Getting instance ID..."
+          TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" 2>/dev/null)
+          INSTANCE_ID=$(curl -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null)
+          export INSTANCE_ID
+          echo "Instance ID: $INSTANCE_ID"
+
+          # Create systemd service
+          cat > /etc/systemd/system/webapp.service << EOF
+          [Unit]
+          Description=Demo Web Application
+          After=network-online.target
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          User=root
+          Environment=INSTANCE_ID=$INSTANCE_ID
+          Environment=PYTHONUNBUFFERED=1
+          WorkingDirectory=/opt/webapp
+          ExecStart=/usr/bin/python3 /opt/webapp/app.py
+          StandardOutput=journal
+          StandardError=journal
+          SyslogIdentifier=webapp
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          echo "Systemd service file created"
+
+          cat > /opt/webapp/trigger-unhealthy.sh << 'EOF'
+          #!/bin/bash
+          curl -s http://localhost/simulate/unhealthy
+          echo ""
+          EOF
+          chmod +x /opt/webapp/trigger-unhealthy.sh
+
+          cat > /opt/webapp/trigger-crash.sh << 'EOF'
+          #!/bin/bash
+          curl -s http://localhost/simulate/crash
+          echo ""
+          EOF
+          chmod +x /opt/webapp/trigger-crash.sh
+
+          cat > /opt/webapp/restore-healthy.sh << 'EOF'
+          #!/bin/bash
+          curl -s http://localhost/simulate/healthy
+          echo ""
+          EOF
+          chmod +x /opt/webapp/restore-healthy.sh
+
+          # Start service
+          echo "Starting webapp service..."
+          systemctl daemon-reload
+          systemctl enable webapp
+          systemctl start webapp
+
+          # Wait for service to start
+          sleep 3
+
+          # Verify service is running
+          if systemctl is-active --quiet webapp; then
+            echo "Webapp service is running"
+          else
+            echo "ERROR: Webapp service failed to start"
+            journalctl -u webapp -n 50
+          fi
+
+          # Verify the app responds
+          for i in {1..10}; do
+            if curl -s http://localhost/health > /dev/null 2>&1; then
+              echo "Health check endpoint is responding"
+              break
+            else
+              echo "Waiting for app to respond (attempt $i/10)..."
+              sleep 2
+            fi
+          done
+
+          # Signal completion
+          echo "Setup complete at $(date)" > /opt/webapp/setup-complete
+          echo "UserData script completed successfully"
+      Tags:
+        - Key: Name
+          Value: !Sub ${AWS::StackName}-instance-2
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+        - Key: Application
+          Value: demo-webapp
+
+  # ==================== CLOUDWATCH ALARMS ====================
+  UnhealthyHostsAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-unhealthy-hosts
+      AlarmDescription: Alarm when targets become unhealthy in the ALB target group
+      MetricName: UnHealthyHostCount
+      Namespace: AWS/ApplicationELB
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 1
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      Dimensions:
+        - Name: TargetGroup
+          Value: !GetAtt ALBTargetGroup.TargetGroupFullName
+        - Name: LoadBalancer
+          Value: !GetAtt ApplicationLoadBalancer.LoadBalancerFullName
+      TreatMissingData: notBreaching
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+
+  TargetResponseTimeAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-high-response-time
+      AlarmDescription: Alarm when target response time is too high
+      MetricName: TargetResponseTime
+      Namespace: AWS/ApplicationELB
+      Statistic: Average
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 2
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: TargetGroup
+          Value: !GetAtt ALBTargetGroup.TargetGroupFullName
+        - Name: LoadBalancer
+          Value: !GetAtt ApplicationLoadBalancer.LoadBalancerFullName
+      TreatMissingData: notBreaching
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+
+  HTTPCode5xxAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      AlarmName: !Sub ${AWS::StackName}-5xx-errors
+      AlarmDescription: Alarm when there are too many 5xx errors
+      MetricName: HTTPCode_Target_5XX_Count
+      Namespace: AWS/ApplicationELB
+      Statistic: Sum
+      Period: 60
+      EvaluationPeriods: 2
+      Threshold: 10
+      ComparisonOperator: GreaterThanThreshold
+      Dimensions:
+        - Name: TargetGroup
+          Value: !GetAtt ALBTargetGroup.TargetGroupFullName
+        - Name: LoadBalancer
+          Value: !GetAtt ApplicationLoadBalancer.LoadBalancerFullName
+      TreatMissingData: notBreaching
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+
+  # ==================== AUTO-CLEANUP (Optional) ====================
+  AutoShutdownLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+      Policies:
+        - PolicyName: EC2StopPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - ec2:StopInstances
+                Resource: "*"
+
+  AutoShutdownFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub ${AWS::StackName}-auto-shutdown
+      Runtime: python3.12
+      Handler: index.handler
+      Role: !GetAtt AutoShutdownLambdaRole.Arn
+      Timeout: 30
+      Environment:
+        Variables:
+          INSTANCE_IDS: !Sub "${EC2Instance1},${EC2Instance2}"
+      Code:
+        ZipFile: |
+          import boto3
+          import os
+
+          def handler(event, context):
+              ec2 = boto3.client('ec2')
+              instance_ids = os.environ['INSTANCE_IDS'].split(',')
+              ec2.stop_instances(InstanceIds=instance_ids)
+              return {'statusCode': 200, 'body': f'Stopped instances: {instance_ids}'}
+      Tags:
+        - Key: Environment
+          Value: !Ref EnvironmentTag
+
+  AutoShutdownRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Sub ${AWS::StackName}-auto-shutdown-rule
+      Description: Stop EC2 instances after 2 hours to save costs
+      ScheduleExpression: rate(2 hours)
+      State: ENABLED
+      Targets:
+        - Id: ShutdownLambda
+          Arn: !GetAtt AutoShutdownFunction.Arn
+
+  AutoShutdownPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AutoShutdownFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt AutoShutdownRule.Arn
+
+Outputs:
+  ALBDNSName:
+    Description: DNS name of the Application Load Balancer
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+    Export:
+      Name: !Sub ${AWS::StackName}-alb-dns
+
+  ALBUrl:
+    Description: URL to access the application
+    Value: !Sub http://${ApplicationLoadBalancer.DNSName}
+
+  HealthCheckUrl:
+    Description: URL to check health endpoint
+    Value: !Sub http://${ApplicationLoadBalancer.DNSName}/health
+
+  Instance1Id:
+    Description: Instance ID of first EC2 instance
+    Value: !Ref EC2Instance1
+
+  Instance2Id:
+    Description: Instance ID of second EC2 instance
+    Value: !Ref EC2Instance2
+
+  TriggerFailureCommand:
+    Description: Command to trigger health check failure (run via SSM or SSH)
+    Value: "curl http://localhost/simulate/unhealthy"
+
+  RestoreHealthCommand:
+    Description: Command to restore healthy status
+    Value: "curl http://localhost/simulate/healthy"
+
+  EnvironmentTagValue:
+    Description: Tag value to use in DevOps Agent Space for resource discovery
+    Value: !Ref EnvironmentTag
