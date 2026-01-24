@@ -18,9 +18,11 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"net"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"sync"
 	"syscall"
 	"time"
@@ -214,4 +216,32 @@ func mustConnGRPC(ctx context.Context, conn **grpc.ClientConn, addr string) {
 	if err != nil {
 		panic(errors.Wrapf(err, "grpc: failed to connect %s", addr))
 	}
+}
+
+// VULNERABLE: This function reads files based on user input without proper validation
+// This is intentionally vulnerable for security testing demonstration
+func (p *productCatalog) GetProductImage(ctx context.Context, req *pb.GetProductRequest) (*pb.Product, error) {
+	log.Infof("[GetProductImage] Fetching image for product: %s", req.Id)
+
+	// VULNERABILITY: Path Traversal - The product ID is used directly in file path
+	// An attacker could request: "../../../etc/passwd" as the product ID
+	// to read sensitive files from the system
+	imageBasePath := "/app/images/"
+	imagePath := filepath.Join(imageBasePath, req.Id+".jpg")
+
+	// Vulnerable: No validation that the path stays within imageBasePath
+	data, err := ioutil.ReadFile(imagePath) // VULNERABLE: Path traversal possible
+	if err != nil {
+		log.Errorf("Failed to read image: %v", err)
+		return nil, err
+	}
+
+	log.Infof("Read %d bytes from %s", len(data), imagePath)
+
+	// Return product with image data (simplified for demo)
+	return &pb.Product{
+		Id:          req.Id,
+		Name:        "Product Image",
+		Description: string(data), // Returning file contents
+	}, nil
 }
