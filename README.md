@@ -1,16 +1,18 @@
 <!-- <p align="center">
 <img src="/src/frontend/static/icons/Hipster_HeroLogoMaroon.svg" width="300" alt="Online Boutique" />
 </p> -->
-![Continuous Integration](https://github.com/GoogleCloudPlatform/microservices-demo/workflows/Continuous%20Integration%20-%20Main/Release/badge.svg)
 
-**Online Boutique** is a cloud-first microservices demo application.  The application is a
-web-based e-commerce app where users can browse items, add them to the cart, and purchase them.
+> **🔱 Fork Notice:** This is a fork of [GoogleCloudPlatform/microservices-demo](https://github.com/GoogleCloudPlatform/microservices-demo) customized for demonstrating **AWS Security Agent** and **AWS DevOps Agent** capabilities on Amazon EKS.
+>
+> **🌐 Live Demo:** [https://boutique.dev.ops4life.com](https://boutique.dev.ops4life.com)
 
-Google uses this application to demonstrate how developers can modernize enterprise applications using Google Cloud products, including: [Google Kubernetes Engine (GKE)](https://cloud.google.com/kubernetes-engine), [Cloud Service Mesh (CSM)](https://cloud.google.com/service-mesh), [gRPC](https://grpc.io/), [Cloud Operations](https://cloud.google.com/products/operations), [Spanner](https://cloud.google.com/spanner), [Memorystore](https://cloud.google.com/memorystore), [AlloyDB](https://cloud.google.com/alloydb), and [Gemini](https://ai.google.dev/). This application works on any Kubernetes cluster.
+**Online Boutique** is a cloud-first microservices demo application. The application is a web-based e-commerce app where users can browse items, add them to the cart, and purchase them.
 
-If you’re using this demo, please **★Star** this repository to show your interest!
+This fork demonstrates how AWS Security Agent and AWS DevOps Agent can be used for security assessment, penetration testing, autonomous incident response, and root cause analysis on Amazon EKS deployments. The application works on any Kubernetes cluster and is primarily deployed on **Amazon EKS** for AWS agent demonstrations.
 
-**Note to Googlers:** Please fill out the form at [go/microservices-demo](http://go/microservices-demo).
+Originally developed by Google to demonstrate modernizing enterprise applications using Google Cloud products. This application maintains compatibility with various cloud platforms while focusing on AWS-based security and DevOps automation capabilities.
+
+If you're using this demo, please **★Star** this repository to show your interest!
 
 ## Architecture
 
@@ -42,13 +44,108 @@ Find **Protocol Buffers Descriptions** at the [`./protos` directory](/protos).
 | ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------ |
 | [![Screenshot of store homepage](/docs/img/online-boutique-frontend-1.png)](/docs/img/online-boutique-frontend-1.png) | [![Screenshot of checkout screen](/docs/img/online-boutique-frontend-2.png)](/docs/img/online-boutique-frontend-2.png) |
 
-## Quickstart (GKE)
+## Quickstart (Amazon EKS)
+
+1. Ensure you have the following requirements:
+   - [AWS Account](https://aws.amazon.com/premiumsupport/knowledge-center/create-and-activate-aws-account/)
+   - Shell environment with `aws`, `git`, and `kubectl`
+   - [eksctl](https://eksctl.io/) or [AWS CLI](https://aws.amazon.com/cli/) for cluster creation
+
+2. Clone this repository.
+
+   ```sh
+   git clone https://github.com/duyluann/microservices-demo.git
+   cd microservices-demo/
+   ```
+
+3. Set your AWS region.
+
+   ```sh
+   export AWS_REGION=ap-southeast-1  # or your preferred region
+   ```
+
+4. Create an EKS cluster.
+
+   Using eksctl:
+   ```sh
+   eksctl create cluster \
+     --name online-boutique \
+     --region ${AWS_REGION} \
+     --nodes 3 \
+     --node-type t3.medium
+   ```
+
+   Creating the cluster may take 15-20 minutes.
+
+5. Deploy Online Boutique to the cluster.
+
+   ```sh
+   kubectl apply -f ./release/kubernetes-manifests.yaml
+   ```
+
+6. Wait for the pods to be ready.
+
+   ```sh
+   kubectl get pods
+   ```
+
+   After a few minutes, you should see the Pods in a `Running` state:
+
+   ```
+   NAME                                     READY   STATUS    RESTARTS   AGE
+   adservice-76bdd69666-ckc5j               1/1     Running   0          2m58s
+   cartservice-66d497c6b7-dp5jr             1/1     Running   0          2m59s
+   checkoutservice-666c784bd6-4jd22         1/1     Running   0          3m1s
+   currencyservice-5d5d496984-4jmd7         1/1     Running   0          2m59s
+   emailservice-667457d9d6-75jcq            1/1     Running   0          3m2s
+   frontend-6b8d69b9fb-wjqdg                1/1     Running   0          3m1s
+   loadgenerator-665b5cd444-gwqdq           1/1     Running   0          3m
+   paymentservice-68596d6dd6-bf6bv          1/1     Running   0          3m
+   productcatalogservice-557d474574-888kr   1/1     Running   0          3m
+   recommendationservice-69c56b74d4-7z8r5   1/1     Running   0          3m1s
+   redis-cart-5f59546cdd-5jnqf              1/1     Running   0          2m58s
+   shippingservice-6ccc89f8fd-v686r         1/1     Running   0          2m58s
+   ```
+
+7. Access the web frontend in a browser using the LoadBalancer's external hostname.
+
+   ```sh
+   kubectl get service frontend-external | awk '{print $4}'
+   ```
+
+   Visit the external hostname in a web browser to access your instance of Online Boutique.
+
+8. **(Optional)** Configure a custom domain with AWS Route 53 or your DNS provider to point to the LoadBalancer. See the live demo at [https://boutique.dev.ops4life.com](https://boutique.dev.ops4life.com) as an example.
+
+9. Congrats! You've deployed Online Boutique on Amazon EKS. To set up AWS Security Agent or AWS DevOps Agent for demonstrations, see [AWS Agent Demonstrations](#aws-agent-demonstrations).
+
+10. Once you are done with it, delete the EKS cluster.
+
+    ```sh
+    eksctl delete cluster --name online-boutique --region ${AWS_REGION}
+    ```
+
+    Deleting the cluster may take a few minutes.
+
+## Additional deployment options
+
+- **GKE (Original deployment target)**: See [Quickstart (GKE)](#quickstart-gke) below for deploying to Google Kubernetes Engine.
+- **Terraform**: [See these instructions](/terraform) to learn how to deploy Online Boutique using [Terraform](https://www.terraform.io/intro).
+- **Istio / Cloud Service Mesh**: [See these instructions](/kustomize/components/service-mesh-istio/README.md) to deploy Online Boutique alongside an Istio-backed service mesh.
+- **Non-GKE clusters (Minikube, Kind, etc)**: See the [Development guide](/docs/development-guide.md) to learn how you can deploy Online Boutique on non-GKE clusters.
+- **AI assistant using Gemini**: [See these instructions](/kustomize/components/shopping-assistant/README.md) to deploy a Gemini-powered AI assistant that suggests products to purchase based on an image.
+- **And more**: The [`/kustomize` directory](/kustomize) contains instructions for customizing the deployment of Online Boutique with other variations.
+
+### Quickstart (GKE)
+
+<details>
+<summary>Click to expand GKE deployment instructions</summary>
 
 1. Ensure you have the following requirements:
    - [Google Cloud project](https://cloud.google.com/resource-manager/docs/creating-managing-projects#creating_a_project).
    - Shell environment with `gcloud`, `git`, and `kubectl`.
 
-2. Clone the latest major version.
+2. Clone the original repository (or use this fork).
 
    ```sh
    git clone --depth 1 --branch v0 https://github.com/GoogleCloudPlatform/microservices-demo.git
@@ -115,7 +212,7 @@ Find **Protocol Buffers Descriptions** at the [`./protos` directory](/protos).
 
    Visit `http://EXTERNAL_IP` in a web browser to access your instance of Online Boutique.
 
-8. Congrats! You've deployed the default Online Boutique. To deploy a different variation of Online Boutique (e.g., with Google Cloud Operations tracing, Istio, etc.), see [Deploy Online Boutique variations with Kustomize](#deploy-online-boutique-variations-with-kustomize).
+8. Congrats! You've deployed the default Online Boutique. To deploy a different variation of Online Boutique (e.g., with Google Cloud Operations tracing, Istio, etc.), see the [kustomize directory](/kustomize).
 
 9. Once you are done with it, delete the GKE cluster.
 
@@ -126,27 +223,54 @@ Find **Protocol Buffers Descriptions** at the [`./protos` directory](/protos).
 
    Deleting the cluster may take a few minutes.
 
-## Additional deployment options
+</details>
 
-- **Terraform**: [See these instructions](/terraform) to learn how to deploy Online Boutique using [Terraform](https://www.terraform.io/intro).
-- **Istio / Cloud Service Mesh**: [See these instructions](/kustomize/components/service-mesh-istio/README.md) to deploy Online Boutique alongside an Istio-backed service mesh.
-- **Non-GKE clusters (Minikube, Kind, etc)**: See the [Development guide](/docs/development-guide.md) to learn how you can deploy Online Boutique on non-GKE clusters.
-- **AI assistant using Gemini**: [See these instructions](/kustomize/components/shopping-assistant/README.md) to deploy a Gemini-powered AI assistant that suggests products to purchase based on an image.
-- **And more**: The [`/kustomize` directory](/kustomize) contains instructions for customizing the deployment of Online Boutique with other variations.
+## AWS Agent Demonstrations
+
+This fork is optimized for demonstrating AWS Security Agent and AWS DevOps Agent capabilities.
+
+**Live Demo:** [https://boutique.dev.ops4life.com](https://boutique.dev.ops4life.com)
+
+### AWS Security Agent
+Security assessment and penetration testing capabilities:
+- [AWS Security Agent Setup Guide](/docs/aws-security-agent-guide.md)
+
+### AWS DevOps Agent
+Autonomous incident response and root cause analysis:
+- [AWS DevOps Agent Setup Guide](/docs/aws-devops-agent-guide.md)
+- [Incident Scenarios](/docs/aws-devops-agent-incident-scenarios.md) - Common incident patterns and investigation workflows
+- [Deployment Integration](/docs/aws-devops-agent-deployment-integration.md) - Enhanced observability and deployment tracking
+- [Prevention Guide](/docs/aws-devops-agent-prevention.md) - Proactive reliability improvements
+
+### Triggering Demo Incidents
+This repository includes GitHub Actions workflows for triggering demo incidents to showcase AWS DevOps Agent's capabilities. See [`.github/workflows/trigger-incident.yaml`](.github/workflows/trigger-incident.yaml) for automated incident simulation.
 
 ## Documentation
 
-- [Development](/docs/development-guide.md) to learn how to run and develop this app locally.
+### AWS-Specific Documentation
+See the guides above for AWS Security Agent and AWS DevOps Agent setup and usage.
 
-## Operational Excellence
+### General Documentation
+- [Development Guide](/docs/development-guide.md) - Learn how to run and develop this app locally
 
-- [AWS Security Agent Setup](/docs/aws-security-agent-guide.md) - Security assessment and penetration testing
-- [AWS DevOps Agent Setup](/docs/aws-devops-agent-guide.md) - Autonomous incident response and root cause analysis
-- [AWS DevOps Agent Incident Scenarios](/docs/aws-devops-agent-incident-scenarios.md) - Common incident patterns and investigation workflows
-- [AWS DevOps Agent Deployment Integration](/docs/aws-devops-agent-deployment-integration.md) - Enhanced observability and deployment tracking
-- [AWS DevOps Agent Prevention Guide](/docs/aws-devops-agent-prevention.md) - Proactive reliability improvements
+## About This Fork
 
-## Demos featuring Online Boutique
+This repository is maintained by [@duyluann](https://github.com/duyluann) as a demonstration platform for AWS Security Agent and AWS DevOps Agent capabilities on Amazon EKS.
+
+**Original Project:** [GoogleCloudPlatform/microservices-demo](https://github.com/GoogleCloudPlatform/microservices-demo)
+
+**Fork Purpose:**
+- Demonstrate AWS Security Agent for security assessment and penetration testing
+- Showcase AWS DevOps Agent for autonomous incident response and root cause analysis
+- Provide AWS-specific deployment patterns and best practices
+- Maintain compatibility with the upstream project while adding AWS-focused enhancements
+
+**Contributing:**
+- AWS-specific enhancements and documentation improvements are welcome
+- For general Online Boutique features, please contribute to the [upstream repository](https://github.com/GoogleCloudPlatform/microservices-demo)
+- Create issues or pull requests for AWS agent integration improvements
+
+## Additional Demos and Resources
 
 - [Security hardening of the OnlineBoutique sample apps with the Docker Hardened Images (DHI)](https://medium.com/google-cloud/security-hardening-of-the-onlineboutique-sample-apps-with-docker-hardened-images-dhi-ca1fad348343)
 - [alpine, distroless or scratch?](https://medium.com/google-cloud/alpine-distroless-or-scratch-caac35250e0b)
